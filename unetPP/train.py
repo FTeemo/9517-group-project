@@ -20,6 +20,7 @@ from torch.optim import lr_scheduler
 from tqdm import tqdm
 
 import archs
+import archtyr2
 import losses
 from dataset import Dataset
 from metrics import iou_score
@@ -30,6 +31,7 @@ import albumentations as A
 ARCH_NAMES = archs.__all__
 LOSS_NAMES = losses.__all__
 LOSS_NAMES.append('BCEWithLogitsLoss')
+ARCH_NAMES.append('UnetPlusPlus')
 
 """
 
@@ -42,15 +44,15 @@ LOSS_NAMES.append('BCEWithLogitsLoss')
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--name', default=None,
+    parser.add_argument('--name', default='AttentionTransformUnet++',
                         help='model name: (default: arch+timestamp)')
     parser.add_argument('--epochs', default=100, type=int, metavar='N',
                         help='number of total epochs to run')
-    parser.add_argument('-b', '--batch_size', default=40, type=int,
+    parser.add_argument('-b', '--batch_size', default=16, type=int,
                         metavar='N', help='mini-batch size (default: 16)')
     
     # model
-    parser.add_argument('--arch', '-a', metavar='ARCH', default='NestedUNet',
+    parser.add_argument('--arch', '-a', metavar='ARCH', default='UnetPlusPlus',
                         choices=ARCH_NAMES,
                         help='model architecture: ' +
                         ' | '.join(ARCH_NAMES) +
@@ -58,24 +60,30 @@ def parse_args():
     parser.add_argument('--deep_supervision', default=False, type=str2bool)
     parser.add_argument('--input_channels', default=3, type=int,
                         help='input channels')
-    parser.add_argument('--num_classes', default=1, type=int,
+    parser.add_argument('--num_classes', default=4, type=int,
                         help='number of classes')
-    parser.add_argument('--input_w', default=256, type=int,
+    parser.add_argument('--input_w', default=512, type=int,
                         help='image width')
-    parser.add_argument('--input_h', default=256, type=int,
+    parser.add_argument('--input_h', default=512, type=int,
                         help='image height')
     
     # loss
-    parser.add_argument('--loss', default='BCEDiceLoss',
+    parser.add_argument('--loss', default='CrossEntropyLoss',
                         choices=LOSS_NAMES,
                         help='loss: ' +
                         ' | '.join(LOSS_NAMES) +
                         ' (default: BCEDiceLoss)')
     
     # dataset
-    parser.add_argument('--dataset', default='./inputs/brain',
+    parser.add_argument('--dataset_train_image', default='/root/9517-group-project/turtles-data/data/img_train',
                         help='dataset name')
-    parser.add_argument('--img_ext', default='.jpg',
+    parser.add_argument('--dataset_train_mask', default='/root/9517-group-project/turtles-data/data/mask_train',
+                        help='dataset name')
+    parser.add_argument('--dataset_val_image', default='/root/9517-group-project/turtles-data/data/img_valid',
+                        help='dataset name')
+    parser.add_argument('--dataset_val_mask', default='/root/9517-group-project/turtles-data/data/mask_valid',
+                        help='dataset name')
+    parser.add_argument('--img_ext', default='.jpeg',
                         help='image file extension')
     parser.add_argument('--mask_ext', default='.png',
                         help='mask file extension')
@@ -135,6 +143,10 @@ def train(config, train_loader, model, criterion, optimizer):
             iou = iou_score(outputs[-1], target)
         else:
             output = model(input)
+            # print('1111111111111111','output:',output.shape,'target:',target.shape,'input:',input.shape)
+            # print(f"Target shape: {target.shape}")    # 期望为 [batch_size, height, width]
+            # print(f"Output shape: {output.shape}")    # 期望为 [batch_size, num_classes, height, width]
+            # print("11111111111111",output,'11111',target[:1])
             loss = criterion(output, target)
             iou = iou_score(output, target)
 
@@ -183,13 +195,15 @@ def validate(config, val_loader, model, criterion):
                 output = model(input)
                 loss = criterion(output, target)
                 iou = iou_score(output, target)
+                # print('222222222222222222222222iou in train:',iou)
 
             avg_meters['loss'].update(loss.item(), input.size(0))
             avg_meters['iou'].update(iou, input.size(0))
 
             postfix = OrderedDict([
                 ('loss', avg_meters['loss'].avg),
-                ('iou', avg_meters['iou'].avg),
+                # ('iou', avg_meters['iou'].avg),
+                ('iou', iou),
             ])
             pbar.set_postfix(postfix)
             pbar.update(1)
@@ -220,6 +234,8 @@ def main():
     # define loss function (criterion)
     if config['loss'] == 'BCEWithLogitsLoss':
         criterion = nn.BCEWithLogitsLoss().cuda()#WithLogits 就是先将输出结果经过sigmoid再交叉熵
+    elif config['loss'] == 'CrossEntropyLoss':
+        criterion = nn.CrossEntropyLoss().cuda()
     else:
         criterion = losses.__dict__[config['loss']]().cuda()
 
@@ -227,7 +243,10 @@ def main():
 
     # create model
     print("=> creating model %s" % config['arch'])
-    model = archs.__dict__[config['arch']](config['num_classes'],
+    if (config['arch'] == 'UnetPlusPlus'):
+        model = archtyr2.UNetPlusPlus(in_channels =3,out_channels =4)
+    else:
+        model = archs.__dict__[config['arch']](config['num_classes'],
                                            config['input_channels'],
                                            config['deep_supervision']
                                           )
@@ -258,19 +277,27 @@ def main():
         raise NotImplementedError
     
     #config['dataset'] = 'brain'
-    print(os.path.join(config['dataset'], 'images', '*' + config['img_ext']))
+    # print(os.path.join(config['dataset'],'img_train/'+ '*' + config['img_ext']))
     # Data loading code
-    img_ids = glob(os.path.join(config['dataset'], 'images', '*' + config['img_ext']))
-    img_ids = [os.path.splitext(os.path.basename(p))[0] for p in img_ids]
-    train_img_ids, val_img_ids = train_test_split(img_ids, test_size=0.2, random_state=41)
+    # print(config['dataset_train_image'])
+    train_img_ids = glob(os.path.join(config['dataset_train_image'], '*' + config['img_ext']))
+    train_img_ids = [os.path.splitext(os.path.basename(p))[0] for p in train_img_ids]
+    val_img_ids = glob(os.path.join(config['dataset_val_image'], '*' + config['img_ext']))
+    val_img_ids = [os.path.splitext(os.path.basename(p))[0] for p in val_img_ids]
+    # print(img_ids)
+
+    # train_img_ids, val_img_ids = train_test_split(img_ids, test_size=0.2, random_state=41)
+    
     #数据增强：
     train_transform = Compose([
         A.RandomRotate90(),
-        transforms.Flip(),
+        # transforms.Flip(),
+        A.HorizontalFlip(),
         OneOf([
             transforms.HueSaturationValue(),
-            transforms.RandomBrightness(),
-            transforms.RandomContrast(),
+            # transforms.RandomBrightness(),
+            A.RandomBrightnessContrast(brightness_limit=(-0.2,0.2), contrast_limit=(-0.2, 0.2))
+            # transforms.RandomContrast(),
         ], p=1),#按照归一化的概率选择执行哪一个
         A.Resize(config['input_h'], config['input_w']),
         transforms.Normalize(),
@@ -283,20 +310,27 @@ def main():
 
     train_dataset = Dataset(
         img_ids=train_img_ids,
-        img_dir=os.path.join('inputs', config['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', config['dataset'], 'masks'),
+        # img_dir=os.path.join(config['dataset'], 'img_train'),
+        img_dir = config['dataset_train_image'],
+        # img_dir = config['dataset'],
+        # mask_dir=os.path.join(config['dataset'], 'mask_train'),
+        mask_dir=config['dataset_train_mask'],
         img_ext=config['img_ext'],
         mask_ext=config['mask_ext'],
-        num_classes=config['num_classes'],
-        transform=train_transform)
+        # num_classes=config['num_classes'],
+        # transform=train_transform
+    )
     val_dataset = Dataset(
         img_ids=val_img_ids,
-        img_dir=os.path.join('inputs', config['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', config['dataset'], 'masks'),
+        # img_dir=os.path.join(config['dataset'], 'img_valid'),
+        # mask_dir=os.path.join(config['dataset'], 'mask_valid'),
+        img_dir = config['dataset_val_image'],
+        mask_dir=config['dataset_val_mask'],
         img_ext=config['img_ext'],
         mask_ext=config['mask_ext'],
-        num_classes=config['num_classes'],
-        transform=val_transform)
+        # num_classes=config['num_classes'],
+        # transform=val_transform
+    )
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -338,21 +372,28 @@ def main():
         print('loss %.4f - iou %.4f - val_loss %.4f - val_iou %.4f'
               % (train_log['loss'], train_log['iou'], val_log['loss'], val_log['iou']))
 
+        # log['epoch'].append(epoch)
+        # log['lr'].append(config['lr'])
+        # log['loss'].append(train_log['loss'])
+        # log['iou'].append(train_log['iou'])
+        # log['val_loss'].append(val_log['loss'])
+        # log['val_iou'].append(val_log['iou'])
+
         log['epoch'].append(epoch)
-        log['lr'].append(config['lr'])
-        log['loss'].append(train_log['loss'])
-        log['iou'].append(train_log['iou'])
-        log['val_loss'].append(val_log['loss'])
-        log['val_iou'].append(val_log['iou'])
+        log['lr'].append(float(config['lr']))  # 确保 lr 是 float 类型
+        log['loss'].append(float(train_log['loss']))  # 确保 loss 是 float 类型
+        log['iou'].append(float(train_log['iou']))  # 确保 iou 是 float 类型
+        log['val_loss'].append(float(val_log['loss']))  # 确保 val_loss 是 float 类型
+        log['val_iou'].append(float(val_log['iou']))  # 确保 val_iou 是 float 类型
+
 
         pd.DataFrame(log).to_csv('models/%s/log.csv' %
                                  config['name'], index=False)
-
         trigger += 1
 
         if val_log['iou'] > best_iou:
             torch.save(model.state_dict(), 'models/%s/model.pth' %
-                       config['name'])
+                       (config['name'])
             best_iou = val_log['iou']
             print("=> saved best model")
             trigger = 0
